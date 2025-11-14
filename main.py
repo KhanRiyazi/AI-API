@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -9,13 +9,16 @@ import os
 from datetime import datetime
 import uuid
 
+# =============================================================
+# APP CONFIG
+# =============================================================
+
 app = FastAPI(
     title="EduAI Principal - School Management System",
     description="AI-Powered School Management Platform",
     version="1.0.0"
 )
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,13 +27,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files
+# Mount static files safely
+if not os.path.exists("static"):
+    os.makedirs("static")
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Database file
 DB_FILE = "data.json"
 
-# Pydantic models
+# =============================================================
+# MODELS
+# =============================================================
+
 class WaitlistEntry(BaseModel):
     id: str
     email: str
@@ -50,8 +58,12 @@ class Enrollment(BaseModel):
     created_at: str
     status: str = "pending"
 
-# Initialize database with better error handling
+# =============================================================
+# DB HELPERS
+# =============================================================
+
 def init_db():
+    """Initialize or repair database file."""
     try:
         if not os.path.exists(DB_FILE):
             data = {
@@ -64,22 +76,17 @@ def init_db():
                     "last_updated": datetime.now().isoformat()
                 }
             }
-            with open(DB_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
+            write_db(data)
             return data
-        
-        # Check if file is empty or corrupted
-        file_size = os.path.getsize(DB_FILE)
-        if file_size == 0:
-            raise ValueError("Database file is empty")
-            
-        with open(DB_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return data
-            
-    except (json.JSONDecodeError, ValueError) as e:
-        print(f"Database corrupted, recreating: {e}")
-        # Create fresh database
+
+        if os.path.getsize(DB_FILE) == 0:
+            raise ValueError("Database empty")
+
+        with open(DB_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    except Exception as e:
+        print(f"[DB ERROR] Resetting database: {e}")
         data = {
             "waitlist": [],
             "enrollments": [],
@@ -90,109 +97,67 @@ def init_db():
                 "last_updated": datetime.now().isoformat()
             }
         }
-        with open(DB_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
+        write_db(data)
         return data
-    except Exception as e:
-        print(f"Error initializing database: {e}")
-        return {
-            "waitlist": [],
-            "enrollments": [],
-            "analytics": {
-                "page_views": 0,
-                "waitlist_count": 0,
-                "enrollment_count": 0,
-                "last_updated": datetime.now().isoformat()
-            }
-        }
 
 def read_db():
     return init_db()
 
 def write_db(data):
     try:
-        with open(DB_FILE, 'w', encoding='utf-8') as f:
+        with open(DB_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
-        print(f"Error writing to database: {e}")
+        print(f"[WRITE ERROR] {e}")
 
-# Routes
+# =============================================================
+# ROUTES
+# =============================================================
+
 @app.get("/", response_class=HTMLResponse)
 async def read_index():
     try:
         with open("static/index.html", "r", encoding="utf-8") as f:
-            html_content = f.read()
-        
-        # Update page views
-        data = read_db()
-        data["analytics"]["page_views"] += 1
-        data["analytics"]["last_updated"] = datetime.now().isoformat()
-        write_db(data)
-        
-        return HTMLResponse(content=html_content)
+            html = f.read()
     except FileNotFoundError:
-        return HTMLResponse(content="""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>EduAI Principal - School Management</title>
-            <style>
-                body { font-family: Arial, sans-serif; margin: 40px; background: #0f1724; color: white; }
-                .container { max-width: 800px; margin: 0 auto; text-align: center; }
-                .btn { background: #6ee7b7; color: #04121a; padding: 12px 24px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; margin: 10px; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>🏫 EduAI Principal</h1>
-                <p>AI-Powered School Management System</p>
-                <p>FastAPI backend is running successfully!</p>
-                <p>Place your index.html file in the static/ directory.</p>
-                <p>
-                    <a href="/docs"><button class="btn">API Documentation</button></a>
-                    <a href="/health"><button class="btn">Health Check</button></a>
-                </p>
-            </div>
-        </body>
-        </html>
-        """)
+        html = """<h1>EduAI Principal</h1><p>Place index.html in static/ folder.</p>"""
 
+    data = read_db()
+    data["analytics"]["page_views"] += 1
+    data["analytics"]["last_updated"] = datetime.now().isoformat()
+    write_db(data)
+
+    return HTMLResponse(content=html)
+
+
+# WAITLIST
 @app.post("/api/waitlist")
-async def join_waitlist(
-    email: str = Form(...),
-    name: Optional[str] = Form(None),
-    type: str = Form("waitlist")
-):
+async def join_waitlist(email: str = Form(...), name: Optional[str] = Form(None)):
     try:
         data = read_db()
-        
-        # Check if email already exists
-        existing = [entry for entry in data["waitlist"] if entry["email"] == email]
-        if existing:
-            return JSONResponse(
-                status_code=400,
-                content={"message": "Email already registered"}
-            )
-        
-        # Create new entry
+
+        if any(entry["email"] == email for entry in data["waitlist"]):
+            return JSONResponse(status_code=400, content={"message": "Email already registered"})
+
         entry = WaitlistEntry(
             id=str(uuid.uuid4()),
             email=email,
             name=name,
-            type=type,
             created_at=datetime.now().isoformat()
         )
-        
+
         data["waitlist"].append(entry.dict())
         data["analytics"]["waitlist_count"] = len(data["waitlist"])
         data["analytics"]["last_updated"] = datetime.now().isoformat()
+
         write_db(data)
-        
         return {"message": "Successfully added to waitlist!", "id": entry.id}
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ENROLLMENT
 @app.post("/api/enroll")
 async def submit_enrollment(
     name: str = Form(...),
@@ -204,8 +169,8 @@ async def submit_enrollment(
 ):
     try:
         data = read_db()
-        
-        enrollment = Enrollment(
+
+        entry = Enrollment(
             id=str(uuid.uuid4()),
             name=name,
             email=email,
@@ -215,136 +180,78 @@ async def submit_enrollment(
             scholarship_info=scholarship_info,
             created_at=datetime.now().isoformat()
         )
-        
-        data["enrollments"].append(enrollment.dict())
+
+        data["enrollments"].append(entry.dict())
         data["analytics"]["enrollment_count"] = len(data["enrollments"])
         data["analytics"]["last_updated"] = datetime.now().isoformat()
+
         write_db(data)
-        
-        return {"message": "Enrollment submitted successfully!", "id": enrollment.id}
-    
+        return {"message": "Enrollment submitted!", "id": entry.id}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# STATS
 @app.get("/api/stats")
-async def get_stats():
-    try:
-        data = read_db()
-        return {
-            "analytics": data["analytics"],
-            "waitlist_count": len(data["waitlist"]),
-            "enrollment_count": len(data["enrollments"])
-        }
-    except Exception as e:
-        print(f"Error in get_stats: {e}")
-        return {
-            "analytics": {
-                "page_views": 0,
-                "waitlist_count": 0,
-                "enrollment_count": 0,
-                "last_updated": datetime.now().isoformat()
-            },
-            "waitlist_count": 0,
-            "enrollment_count": 0
-        }
+async def stats():
+    data = read_db()
+    return {
+        "analytics": data["analytics"],
+        "waitlist_count": len(data["waitlist"]),
+        "enrollment_count": len(data["enrollments"])
+    }
+
+
+# ADMIN GETTERS
+@app.get("/api/enrollments")
+async def get_enrollments():
+    return {"enrollments": read_db()["enrollments"]}
 
 @app.get("/api/waitlist")
 async def get_waitlist():
-    try:
-        data = read_db()
-        return {"waitlist": data["waitlist"]}
-    except Exception as e:
-        print(f"Error in get_waitlist: {e}")
-        return {"waitlist": []}
+    return {"waitlist": read_db()["waitlist"]}
 
-@app.get("/api/enrollments")
-async def get_enrollments():
-    try:
-        data = read_db()
-        return {"enrollments": data["enrollments"]}
-    except Exception as e:
-        print(f"Error in get_enrollments: {e}")
-        return {"enrollments": []}
 
+# DELETE endpoints
 @app.delete("/api/waitlist/{entry_id}")
-async def delete_waitlist_entry(entry_id: str):
-    try:
-        data = read_db()
-        data["waitlist"] = [entry for entry in data["waitlist"] if entry["id"] != entry_id]
-        data["analytics"]["waitlist_count"] = len(data["waitlist"])
-        data["analytics"]["last_updated"] = datetime.now().isoformat()
-        write_db(data)
-        return {"message": "Waitlist entry deleted successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+async def delete_waitlist(entry_id: str):
+    data = read_db()
+    data["waitlist"] = [e for e in data["waitlist"] if e["id"] != entry_id]
+    write_db(data)
+    return {"message": "Deleted"}
 
 @app.delete("/api/enrollments/{enrollment_id}")
 async def delete_enrollment(enrollment_id: str):
-    try:
-        data = read_db()
-        data["enrollments"] = [enrollment for enrollment in data["enrollments"] if enrollment["id"] != enrollment_id]
-        data["analytics"]["enrollment_count"] = len(data["enrollments"])
-        data["analytics"]["last_updated"] = datetime.now().isoformat()
-        write_db(data)
-        return {"message": "Enrollment deleted successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    data = read_db()
+    data["enrollments"] = [e for e in data["enrollments"] if e["id"] != enrollment_id]
+    write_db(data)
+    return {"message": "Deleted"}
 
-@app.post("/api/simulate-data")
-async def simulate_data():
-    try:
-        data = read_db()
-        
-        sample_waitlist = WaitlistEntry(
-            id=str(uuid.uuid4()),
-            email="student@school.edu",
-            name="Sample Student",
-            type="waitlist",
-            created_at=datetime.now().isoformat()
-        )
-        
-        sample_enrollment = Enrollment(
-            id=str(uuid.uuid4()),
-            name="Sample Teacher",
-            email="teacher@school.edu",
-            track="Mathematics",
-            experience="Expert",
-            created_at=datetime.now().isoformat()
-        )
-        
-        data["waitlist"].append(sample_waitlist.dict())
-        data["enrollments"].append(sample_enrollment.dict())
-        
-        data["analytics"]["waitlist_count"] = len(data["waitlist"])
-        data["analytics"]["enrollment_count"] = len(data["enrollments"])
-        data["analytics"]["last_updated"] = datetime.now().isoformat()
-        
-        write_db(data)
-        return {"message": "Sample data added successfully"}
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
+# HEALTH CHECK
 @app.get("/health")
-async def health_check():
+async def health():
     return {
         "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "service": "EduAI Principal API",
-        "database": "operational" if os.path.exists(DB_FILE) else "initializing"
+        "time": datetime.now().isoformat(),
+        "db_exists": os.path.exists(DB_FILE),
     }
 
-@app.get("/reset-db")
-async def reset_database():
-    """Endpoint to reset the database if it gets corrupted"""
-    try:
-        if os.path.exists(DB_FILE):
-            os.remove(DB_FILE)
-        init_db()
-        return {"message": "Database reset successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
+# RESET DB
+@app.get("/reset-db")
+async def reset_db():
+    if os.path.exists(DB_FILE):
+        os.remove(DB_FILE)
+    init_db()
+    return {"message": "Database reset"}
+
+
+# =============================================================
+# RAILWAY STARTUP
+# =============================================================
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8080))  # Railway injects PORT automatically
+    uvicorn.run(app, host="0.0.0.0", port=port)
